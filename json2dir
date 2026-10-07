@@ -1,0 +1,49 @@
+#!/bin/sh
+# The COW evaluator (json2dir.cow, transliterated from json2dir-brainfuck's json2dir.bf by
+# tools/bf2cow.py) owns UTF-8 checking, JSON parsing, validation and shell generation; this
+# launcher only moves bytes and runs the generated script.
+#
+# Transport framing only: COW's Moo reads one character and then discards the rest of the
+# line, and cannot see end of input.  So the document is fed as its decimal byte values
+# (od), one character per line, each value followed by a " " line, and a final "x" line
+# that ends the input.
+set -eu
+
+if [ "$#" -ne 0 ]; then
+  printf '%s\n' 'Usage: json2dir < file.json' >&2
+  exit 2
+fi
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+task_tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/json2dir.XXXXXXXXXX")
+trap 'rm -rf -- "$task_tmp"' 0
+trap 'exit 1' HUP INT TERM
+
+if ! (umask 077; cat > "$task_tmp/input.json"); then
+  printf '%s\n' "json2dir: couldn't read stdin" >&2
+  exit 1
+fi
+
+# The interpreter is BigZaphod's cow (cow.cpp, built with -DNO_GREETINGS).
+if ! (
+  umask 077
+  od -An -v -tu1 -w1 < "$task_tmp/input.json" | sed 's/ //g; s/./&\n/g; s/$/ /' > "$task_tmp/input.txt"
+  printf 'x\n' >> "$task_tmp/input.txt"
+  ${JSON2DIR_COW:-cow} "$script_dir/json2dir.cow" < "$task_tmp/input.txt" > "$task_tmp/tree.sh"
+); then
+  exit 1
+fi
+
+# The script is only run if the evaluator wrote its end marker as the last line;
+# otherwise its last line is its error message.
+last=$(tail -n 1 "$task_tmp/tree.sh")
+if [ "$last" != '# json2dir: end' ]; then
+  case $last in
+    'json2dir: '*) printf '%s\n' "$last" >&2 ;;
+    *) printf '%s\n' 'json2dir: the evaluator did not finish' >&2 ;;
+  esac
+  exit 1
+fi
+
+"${JSON2DIR_SHELL:-/bin/sh}" "$task_tmp/tree.sh"
